@@ -1,0 +1,7 @@
+{
+  "sources": ["reddit"],
+  "communities": ["startups", "SaaS", "EntrepreneurRideAlong"],
+  "domain": "founder tools, feedback, user research",
+  "rubric": "Score 0-100 for relevance. Classify as 'pitch' (a direct opportunity to mention a product) or 'credibility' (worth engaging with to build presence, not yet a pitch moment).",
+  "post_limit_per_community": 25
+}
