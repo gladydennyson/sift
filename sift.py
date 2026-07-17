@@ -22,10 +22,11 @@ import re
 import sys
 
 import feedparser
-from anthropic import Anthropic
+from openai import OpenAI
 
 REDDIT_RSS_TEMPLATE = "https://www.reddit.com/r/{subreddit}/new/.rss"
-MODEL = "claude-sonnet-4-6"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+MODEL = "deepseek-v4-flash"
 
 
 def load_config(path):
@@ -96,12 +97,12 @@ Respond with ONLY a JSON object, no other text, no markdown fences, in exactly t
 def score_post(client, domain, rubric, post):
     prompt = build_prompt(domain, rubric, post)
     try:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
+        text = response.choices[0].message.content.strip()
         text = re.sub(r"^```json|```$", "", text, flags=re.MULTILINE).strip()
         result = json.loads(text)
         post["score"] = int(result.get("score", 0))
@@ -120,13 +121,13 @@ def main():
     parser.add_argument("--top", type=int, default=20, help="how many results to print")
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        print("Error: set ANTHROPIC_API_KEY as an environment variable first.", file=sys.stderr)
+        print("Error: set DEEPSEEK_API_KEY as an environment variable first.", file=sys.stderr)
         sys.exit(1)
 
     config = load_config(args.config)
-    client = Anthropic(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
     print(f"Domain: {config.get('domain')}")
     print("Fetching posts...")
