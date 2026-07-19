@@ -1,63 +1,74 @@
-# Sift
+# Sift Dashboard
 
-A generic signal-detection engine. Point it at a domain, and it surfaces
-the posts that matter, ranked by relevance.
+A full-stack version of Sift: a FastAPI backend (Python) that does the
+fetching/interpreting/scoring, and a Next.js frontend (React + TypeScript
++ Tailwind) that gives you an actual UI to drive it.
 
-Sift watches a set of sources (currently Reddit, via RSS), scores every
-new post against a rubric using an LLM, and prints the top results. The
-domain and rubric live entirely in a config file, never in the code -
-swap the config and Sift watches something completely different.
+## Structure
 
-## How it works
+```
+sift-app/
+  backend/     FastAPI API - interpret + score endpoints
+  frontend/    Next.js dashboard - input, subreddit review, results table
+```
 
-1. Pull recent posts from each subreddit listed in the config (via RSS,
-   no API keys or app registration required)
-2. Score each post against the config's rubric using Claude
-3. Sort by score, print the top N
-
-## Setup
+## Backend setup
 
 ```bash
+cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+export DEEPSEEK_API_KEY="your-key-here"
+export REDDIT_USER_AGENT="python:sift:v1.0 (by /u/your_reddit_username)"
+
+uvicorn main:app --reload --port 8000
 ```
 
-Set your Anthropic API key as an environment variable:
+Leave this running in its own terminal tab. Visit
+`http://localhost:8000/docs` to see the interactive API docs FastAPI
+generates automatically.
+
+## Frontend setup
+
+In a **second** terminal tab:
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+cd frontend
+npm install
+npm run dev
 ```
 
-(or copy `.env.example` to `.env`, fill it in, and load it with
-`python-dotenv` if you prefer)
+Visit `http://localhost:3000` - that's the actual dashboard.
 
-## Usage
+## How it works
 
-```bash
-python sift.py --config config.json
-python sift.py --config config.json --top 10
-```
+1. **Input** - type a free-form description of what you're trying to find
+   (no need to separately specify a "domain" or "rubric" - the backend
+   derives both from your text).
+2. **Subreddit review** - the backend suggests candidate subreddits based
+   on your description. Add, edit, or remove any before continuing. Common
+   forms such as `relationships`, `r/relationships`, and Reddit URLs are
+   normalized automatically.
+3. **Results** - the backend fetches recent posts from each subreddit via
+   RSS, scores every one against the derived rubric, and the dashboard
+   shows a ranked table: score, title, reason, link.
 
-## Configuring a new domain
+## Notes
 
-Edit `config.json`, or create a new one and point `--config` at it:
-
-```json
-{
-  "sources": ["reddit"],
-  "communities": ["ArgentinaFootball", "soccer"],
-  "domain": "Argentina national team match commentary",
-  "rubric": "Score 0-100. Classify as 'breaking' or 'reaction'.",
-  "post_limit_per_community": 25
-}
-```
-
-No changes to `sift.py` are required to point it at a new domain.
-
-## Status
-
-This is v0: a single script, Reddit only, no persistence, no scheduling,
-no push notifications. It exists to answer one question - does the
-rubric produce a ranking worth trusting? Everything after that is
-infrastructure.
+- Both servers need to be running at the same time (backend on :8000,
+  frontend on :3000) for the dashboard to work.
+- The DeepSeek API key only ever lives on the backend - it's never sent
+  to or stored in the browser.
+- A Phase 1 scan is intentionally limited to 5 subreddits and 5 posts per
+  subreddit. This keeps response time and model cost predictable while the
+  relevance workflow is being validated.
+- Reddit may rate-limit RSS traffic. Sift spaces feed requests and retries
+  HTTP 429 responses with bounded backoff. Set `REDDIT_USER_AGENT` to a
+  descriptive value containing your Reddit username.
+- Set `NEXT_PUBLIC_API_BASE_URL` for a non-local backend. Set the backend's
+  comma-separated `SIFT_ALLOWED_ORIGINS` variable for non-local frontends.
+- No data persists between runs yet - refreshing or restarting starts
+  fresh. Persistence, scheduling, and push notifications are later
+  phases (v2+ in the original project plan), not part of this dashboard.
