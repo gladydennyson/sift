@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+.env
+**/.env
+**/venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/.next
+results.txt
+npm-debug.log*
