@@ -42,6 +42,32 @@ npm run dev
 
 Visit `http://localhost:3000` - that's the actual dashboard.
 
+## Docker setup
+
+Docker runs the backend and frontend together, so you do not need to
+activate the Python virtual environment or run the Next.js server manually.
+
+Create the local environment file once and fill in your real values:
+
+```bash
+cp .env.example .env
+```
+
+Build and start both services:
+
+```bash
+docker compose up --build
+```
+
+Visit `http://localhost:3000`. The backend health endpoint remains available
+at `http://localhost:8000/health`.
+
+Stop the stack with `Ctrl+C`, or from another terminal run:
+
+```bash
+docker compose down
+```
+
 ## How it works
 
 1. **Input** - type a free-form description of what you're trying to find
