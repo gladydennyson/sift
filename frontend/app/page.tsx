@@ -24,10 +24,10 @@ type ScanStatus = "idle" | "queued" | "running" | "completed" | "failed";
 type ScanSnapshot = {
   scan_id: string;
   status: Exclude<ScanStatus, "idle">;
-  total_posts: number;
-  processed_posts: number;
+  total_communities: number;
+  checked_communities: number;
+  communities_with_posts: number;
   results: ScoredPost[];
-  warnings: string[];
   error: string | null;
 };
 
@@ -55,13 +55,13 @@ export default function SiftDashboard() {
   const [derived, setDerived] = useState<Derived | null>(null);
   const [subredditsText, setSubredditsText] = useState("");
   const [results, setResults] = useState<ScoredPost[]>([]);
-  const [warnings, setWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scanId, setScanId] = useState<string | null>(null);
   const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
-  const [totalPosts, setTotalPosts] = useState(0);
-  const [processedPosts, setProcessedPosts] = useState(0);
+  const [totalCommunities, setTotalCommunities] = useState(0);
+  const [checkedCommunities, setCheckedCommunities] = useState(0);
+  const [communitiesWithPosts, setCommunitiesWithPosts] = useState(0);
 
   // A scan continues in the worker after POST /scans returns. Poll its Redis-
   // backed API snapshot until the worker marks it completed or failed.
@@ -79,10 +79,10 @@ export default function SiftDashboard() {
         if (cancelled) return;
 
         setScanStatus(data.status);
-        setTotalPosts(data.total_posts);
-        setProcessedPosts(data.processed_posts);
+        setTotalCommunities(data.total_communities);
+        setCheckedCommunities(data.checked_communities);
+        setCommunitiesWithPosts(data.communities_with_posts);
         setResults(data.results);
-        setWarnings(data.warnings);
 
         // Terminal states stop polling. Active states schedule another check
         // instead of holding one long HTTP request open.
@@ -166,9 +166,9 @@ export default function SiftDashboard() {
       // Moving to results immediately is possible because the worker owns the
       // slow fetch-and-score work; the polling effect follows its progress.
       setResults([]);
-      setWarnings([]);
-      setTotalPosts(0);
-      setProcessedPosts(0);
+      setTotalCommunities(finalSubs.length);
+      setCheckedCommunities(0);
+      setCommunitiesWithPosts(0);
       setScanStatus(data.status);
       setScanId(data.scan_id);
       setStage("results");
@@ -184,11 +184,11 @@ export default function SiftDashboard() {
     setUserText("");
     setDerived(null);
     setResults([]);
-    setWarnings([]);
     setScanId(null);
     setScanStatus("idle");
-    setTotalPosts(0);
-    setProcessedPosts(0);
+    setTotalCommunities(0);
+    setCheckedCommunities(0);
+    setCommunitiesWithPosts(0);
     setError(null);
   }
 
@@ -199,7 +199,7 @@ export default function SiftDashboard() {
           sift
         </h1>
         <span className="text-sm text-[var(--ink-dim)]">
-          signal detection for Reddit
+          find relevant Reddit conversations
         </span>
       </header>
 
@@ -283,9 +283,11 @@ export default function SiftDashboard() {
             <div className="text-sm text-[var(--ink-dim)]">
               {scanStatus === "queued" && "Scan queued — waiting for a worker"}
               {scanStatus === "running" &&
-                `Scoring posts: ${processedPosts} of ${totalPosts || "..."}`}
+                (results.length
+                  ? `Showing ${results.length} ranked posts · checked ${checkedCommunities} of ${totalCommunities} subreddits`
+                  : `Checking subreddits: ${checkedCommunities} of ${totalCommunities}`)}
               {scanStatus === "completed" &&
-                `${results.length} posts ranked, highest relevance first`}
+                `${results.length} posts ranked from ${communitiesWithPosts} of ${totalCommunities} subreddits`}
               {scanStatus === "failed" && "Scan failed"}
             </div>
             <button
@@ -302,8 +304,8 @@ export default function SiftDashboard() {
                 <div
                   className="h-full rounded-full bg-[var(--signal)] transition-all duration-500"
                   style={{
-                    width: totalPosts
-                      ? `${Math.round((processedPosts / totalPosts) * 100)}%`
+                    width: totalCommunities
+                      ? `${Math.round((checkedCommunities / totalCommunities) * 100)}%`
                       : "8%",
                   }}
                 />
@@ -314,13 +316,15 @@ export default function SiftDashboard() {
             </div>
           )}
 
-          {warnings.length > 0 && (
-            <div className="mb-4 space-y-1">
-              {warnings.map((w, i) => (
-                <div key={i} className="text-xs text-[var(--warn)]">
-                  {w}
-                </div>
-              ))}
+          {scanStatus === "completed" && results.length === 0 && (
+            <div className="max-w-xl rounded border border-[var(--border)] bg-[var(--panel)] p-5">
+              <p className="text-sm text-[var(--ink)]">
+                No posts are available from these subreddits yet.
+              </p>
+              <p className="mt-2 text-xs text-[var(--ink-dim)]">
+                Cached feed coverage is still being built. Try this scan again
+                later.
+              </p>
             </div>
           )}
 

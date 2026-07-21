@@ -2,6 +2,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+k8s/secret.local.yaml
 results.txt
 node_modules/
 .next/

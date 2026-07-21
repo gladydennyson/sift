@@ -11,7 +11,7 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY backend/core.py backend/main.py backend/scan_store.py backend/worker.py ./
+COPY backend/core.py backend/main.py backend/reddit_cache.py backend/scan_store.py backend/worker.py ./
 
 USER appuser
 

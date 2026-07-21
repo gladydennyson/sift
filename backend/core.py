@@ -66,7 +66,7 @@ def fetch_reddit(
         except HTTPError as exc:
             if exc.code != 429 or attempt == max_attempts - 1:
                 detail = str(exc)
-                if exc.code == 429:
+                if exc.code == 429 and max_attempts > 1:
                     detail += " (Reddit rate limit remained active after retries)"
                 return [], detail
             retry_after = exc.headers.get("Retry-After")

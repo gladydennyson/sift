@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sift-config
+  namespace: sift
+data:
+  REDIS_URL: redis://redis:6379/0
+  SIFT_ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+  REDDIT_CACHE_FRESH_SECONDS: "900"
+  REDDIT_CACHE_TTL_SECONDS: "3600"
+  REDDIT_COOLDOWN_SECONDS: "600"
+  REDDIT_REQUEST_INTERVAL_SECONDS: "60"
+  REDDIT_RSS_CANDIDATE_LIMIT: "25"

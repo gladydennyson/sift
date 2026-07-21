@@ -3,7 +3,8 @@ Sift API - FastAPI backend.
 
 Endpoints:
   POST /interpret  - free-text requirements -> domain, rubric, candidate subreddits
-  POST /score      - finalized subreddits + domain/rubric -> ranked results
+  POST /scans      - queue finalized subreddits + scoring guidance
+  GET /scans/{id}  - read incremental scan progress and results
 
 Run with:
   uvicorn main:app --reload --port 8000
@@ -11,9 +12,7 @@ Run with:
 
 import os
 import re
-import time
 from uuid import uuid4
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,9 +22,7 @@ from redis.exceptions import RedisError
 from core import (
     get_client,
     interpret_requirements,
-    fetch_reddit,
     normalize_subreddit,
-    score_post,
 )
 from scan_store import create_scan, get_redis, load_scan, public_scan
 
@@ -97,11 +94,6 @@ class ScoredPost(BaseModel):
     community: str
 
 
-class ScoreResponse(BaseModel):
-    results: list[ScoredPost]
-    warnings: list[str]
-
-
 class ScanCreated(BaseModel):
     scan_id: str
     status: str
@@ -110,10 +102,12 @@ class ScanCreated(BaseModel):
 class ScanStatus(BaseModel):
     scan_id: str
     status: str
+    total_communities: int = 0
+    checked_communities: int = 0
+    communities_with_posts: int = 0
     total_posts: int
     processed_posts: int
     results: list[ScoredPost]
-    warnings: list[str]
     error: str | None
     created_at: str
     updated_at: str
@@ -129,49 +123,6 @@ def interpret(req: InterpretRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Failed to interpret requirements: {e}")
     return derived
-
-
-@app.post("/score", response_model=ScoreResponse)
-def score(req: ScoreRequest):
-    client = _client()
-
-    all_posts = []
-    warnings = []
-    for index, community in enumerate(req.subreddits):
-        if index:
-            time.sleep(1)
-        posts, err = fetch_reddit(community, req.post_limit_per_community)
-        if err:
-            warnings.append(f"Could not read r/{community}: {err}")
-        all_posts.extend(posts)
-
-    # Reddit feeds can occasionally surface the same post through more than
-    # one community listing. Score each URL only once.
-    unique_posts = {}
-    for post in all_posts:
-        key = post.get("url") or f"{post['community']}:{post['title']}"
-        unique_posts.setdefault(key, post)
-    all_posts = list(unique_posts.values())
-
-    # Keep concurrency deliberately small so scans finish promptly without
-    # overwhelming the model provider or creating surprising costs.
-    with ThreadPoolExecutor(max_workers=min(5, len(all_posts) or 1)) as executor:
-        futures = {
-            executor.submit(score_post, client, req.domain, req.rubric, post): post
-            for post in all_posts
-        }
-        for future in as_completed(futures):
-            post = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                post["score"] = 0
-                post["reason"] = f"error: {exc}"
-                warnings.append(f"Could not score a post from r/{post['community']}")
-
-    all_posts.sort(key=lambda p: p["score"], reverse=True)
-
-    return {"results": all_posts, "warnings": warnings}
 
 
 @app.post("/scans", response_model=ScanCreated, status_code=202)
