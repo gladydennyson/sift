@@ -2,12 +2,12 @@
 
 import logging
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from core import fetch_reddit, get_client, score_post
+from reddit_cache import fetch_cached_reddit
 from scan_store import SCAN_QUEUE, get_redis, load_scan, save_scan
 
 logging.basicConfig(
@@ -15,6 +15,46 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger("sift.worker")
+
+
+def _score_and_save_posts(client, redis_client, scan: dict, posts: list[dict]) -> None:
+    """Score one subreddit's posts and publish each result immediately."""
+    request = scan["request"]
+    with ThreadPoolExecutor(max_workers=min(5, len(posts) or 1)) as executor:
+        futures = {
+            executor.submit(
+                score_post,
+                client,
+                request["domain"],
+                request["rubric"],
+                post,
+            ): post
+            for post in posts
+        }
+        for future in as_completed(futures):
+            post = futures[future]
+            try:
+                scored_post = future.result()
+            except Exception as exc:
+                post["score"] = 0
+                post["reason"] = f"error: {exc}"
+                scored_post = post
+                logger.warning(
+                    "Scan %s could not score a post from r/%s",
+                    scan["scan_id"],
+                    post["community"],
+                )
+
+            scan["results"].append({
+                "title": scored_post["title"],
+                "url": scored_post["url"],
+                "score": scored_post["score"],
+                "reason": scored_post["reason"],
+                "community": scored_post["community"],
+            })
+            scan["results"].sort(key=lambda item: item["score"], reverse=True)
+            scan["processed_posts"] += 1
+            save_scan(redis_client, scan)
 
 
 def process_scan(redis_client, scan_id: str) -> None:
@@ -33,71 +73,40 @@ def process_scan(redis_client, scan_id: str) -> None:
             raise RuntimeError("DEEPSEEK_API_KEY is not set on the worker")
 
         request = scan["request"]
-        all_posts = []
-        # Fetch subreddits sequentially with a pause between them. Sending all
-        # Reddit requests at once would make HTTP 429 rate limits more likely.
-        for index, community in enumerate(request["subreddits"]):
-            if index:
-                time.sleep(1)
-            posts, error = fetch_reddit(
+        client = get_client(api_key)
+        seen_posts = set()
+        # Every worker shares the same Redis feed cache, request pacing, and
+        # cooldown. Repeated scans can therefore reuse posts without repeatedly
+        # contacting Reddit from the same public IP.
+        for community in request["subreddits"]:
+            posts, warning = fetch_cached_reddit(
+                redis_client,
                 community,
                 request["post_limit_per_community"],
+                fetch_reddit,
             )
-            if error:
-                scan["warnings"].append(f"Could not read r/{community}: {error}")
-            all_posts.extend(posts)
+            if warning:
+                # RSS availability is operational information for developers.
+                # It is logged rather than shown above otherwise valid results.
+                logger.warning("Scan %s: %s", scan_id, warning)
+            scan["checked_communities"] += 1
+            if posts:
+                scan["communities_with_posts"] += 1
 
-        unique_posts = {}
-        for post in all_posts:
-            key = post.get("url") or f"{post['community']}:{post['title']}"
-            unique_posts.setdefault(key, post)
-        all_posts = list(unique_posts.values())
+            unique_posts = []
+            for post in posts:
+                key = post.get("url") or f"{post['community']}:{post['title']}"
+                if key not in seen_posts:
+                    seen_posts.add(key)
+                    unique_posts.append(post)
 
-        scan["total_posts"] = len(all_posts)
-        save_scan(redis_client, scan)
-
-        client = get_client(api_key)
-        # Reddit fetching is paced, but scoring can safely process up to five
-        # independent posts concurrently to reduce the total scan duration.
-        with ThreadPoolExecutor(max_workers=min(5, len(all_posts) or 1)) as executor:
-            futures = {
-                executor.submit(
-                    score_post,
-                    client,
-                    request["domain"],
-                    request["rubric"],
-                    post,
-                ): post
-                for post in all_posts
-            }
-            for future in as_completed(futures):
-                post = futures[future]
-                try:
-                    scored_post = future.result()
-                except Exception as exc:
-                    post["score"] = 0
-                    post["reason"] = f"error: {exc}"
-                    scored_post = post
-                    scan["warnings"].append(
-                        f"Could not score a post from r/{post['community']}"
-                    )
-
-                scan["results"].append({
-                    "title": scored_post["title"],
-                    "url": scored_post["url"],
-                    "score": scored_post["score"],
-                    "reason": scored_post["reason"],
-                    "community": scored_post["community"],
-                })
-                scan["results"].sort(key=lambda item: item["score"], reverse=True)
-                scan["processed_posts"] += 1
-                # Save after every completed post so dashboard polling shows
-                # incremental progress instead of waiting for the entire scan.
-                save_scan(redis_client, scan)
+            scan["total_posts"] += len(unique_posts)
+            save_scan(redis_client, scan)
+            _score_and_save_posts(client, redis_client, scan, unique_posts)
 
         scan["status"] = "completed"
         save_scan(redis_client, scan)
-        logger.info("Completed scan %s with %s posts", scan_id, len(all_posts))
+        logger.info("Completed scan %s with %s posts", scan_id, scan["total_posts"])
     except Exception as exc:
         logger.exception("Scan %s failed", scan_id)
         scan["status"] = "failed"
