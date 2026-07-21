@@ -12,11 +12,13 @@ Run with:
 import os
 import re
 import time
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
+from redis.exceptions import RedisError
 
 from core import (
     get_client,
@@ -25,6 +27,7 @@ from core import (
     normalize_subreddit,
     score_post,
 )
+from scan_store import create_scan, get_redis, load_scan, public_scan
 
 app = FastAPI(title="Sift API")
 
@@ -99,6 +102,23 @@ class ScoreResponse(BaseModel):
     warnings: list[str]
 
 
+class ScanCreated(BaseModel):
+    scan_id: str
+    status: str
+
+
+class ScanStatus(BaseModel):
+    scan_id: str
+    status: str
+    total_posts: int
+    processed_posts: int
+    results: list[ScoredPost]
+    warnings: list[str]
+    error: str | None
+    created_at: str
+    updated_at: str
+
+
 @app.post("/interpret", response_model=InterpretResponse)
 def interpret(req: InterpretRequest):
     if not req.user_text.strip():
@@ -154,6 +174,34 @@ def score(req: ScoreRequest):
     return {"results": all_posts, "warnings": warnings}
 
 
+@app.post("/scans", response_model=ScanCreated, status_code=202)
+def start_scan(req: ScoreRequest):
+    """Queue slow scan work and return immediately instead of blocking HTTP."""
+    try:
+        redis_client = get_redis()
+        redis_client.ping()
+        scan = create_scan(redis_client, str(uuid4()), req.model_dump())
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail="Scan queue is unavailable.") from exc
+    return {"scan_id": scan["scan_id"], "status": scan["status"]}
+
+
+@app.get("/scans/{scan_id}", response_model=ScanStatus)
+def get_scan(scan_id: str):
+    """Return the latest Redis snapshot for frontend progress polling."""
+    try:
+        scan = load_scan(get_redis(), scan_id)
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail="Scan queue is unavailable.") from exc
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found or expired.")
+    return public_scan(scan)
+
+
 @app.get("/health")
 def health():
+    try:
+        get_redis().ping()
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail="Redis is unavailable.") from exc
     return {"status": "ok"}

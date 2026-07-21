@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -19,6 +19,17 @@ type ScoredPost = {
 };
 
 type Stage = "input" | "subreddits" | "results";
+type ScanStatus = "idle" | "queued" | "running" | "completed" | "failed";
+
+type ScanSnapshot = {
+  scan_id: string;
+  status: Exclude<ScanStatus, "idle">;
+  total_posts: number;
+  processed_posts: number;
+  results: ScoredPost[];
+  warnings: string[];
+  error: string | null;
+};
 
 const MAX_SUBREDDITS = 5;
 
@@ -47,6 +58,56 @@ export default function SiftDashboard() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanId, setScanId] = useState<string | null>(null);
+  const [scanStatus, setScanStatus] = useState<ScanStatus>("idle");
+  const [totalPosts, setTotalPosts] = useState(0);
+  const [processedPosts, setProcessedPosts] = useState(0);
+
+  // A scan continues in the worker after POST /scans returns. Poll its Redis-
+  // backed API snapshot until the worker marks it completed or failed.
+  useEffect(() => {
+    if (!scanId) return;
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    async function pollScan() {
+      try {
+        const res = await fetch(`${API_BASE}/scans/${scanId}`);
+        if (!res.ok) throw new Error(await getApiError(res));
+        const data: ScanSnapshot = await res.json();
+        if (cancelled) return;
+
+        setScanStatus(data.status);
+        setTotalPosts(data.total_posts);
+        setProcessedPosts(data.processed_posts);
+        setResults(data.results);
+        setWarnings(data.warnings);
+
+        // Terminal states stop polling. Active states schedule another check
+        // instead of holding one long HTTP request open.
+        if (data.status === "failed") {
+          setError(data.error ?? "The scan failed.");
+          return;
+        }
+        if (data.status !== "completed") {
+          timer = setTimeout(pollScan, 1500);
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Could not read scan progress");
+        // A temporary network/backend failure should not lose the scan; retry
+        // more slowly while preserving its scan ID.
+        timer = setTimeout(pollScan, 3000);
+      }
+    }
+
+    pollScan();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [scanId]);
 
   async function handleAnalyze() {
     if (!userText.trim()) return;
@@ -91,7 +152,7 @@ export default function SiftDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/score`, {
+      const res = await fetch(`${API_BASE}/scans`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -101,9 +162,15 @@ export default function SiftDashboard() {
         }),
       });
       if (!res.ok) throw new Error(await getApiError(res));
-      const data: { results: ScoredPost[]; warnings: string[] } = await res.json();
-      setResults(data.results);
-      setWarnings(data.warnings);
+      const data: { scan_id: string; status: "queued" } = await res.json();
+      // Moving to results immediately is possible because the worker owns the
+      // slow fetch-and-score work; the polling effect follows its progress.
+      setResults([]);
+      setWarnings([]);
+      setTotalPosts(0);
+      setProcessedPosts(0);
+      setScanStatus(data.status);
+      setScanId(data.scan_id);
       setStage("results");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Something went wrong");
@@ -118,6 +185,10 @@ export default function SiftDashboard() {
     setDerived(null);
     setResults([]);
     setWarnings([]);
+    setScanId(null);
+    setScanStatus("idle");
+    setTotalPosts(0);
+    setProcessedPosts(0);
     setError(null);
   }
 
@@ -143,7 +214,7 @@ export default function SiftDashboard() {
           <label className="mb-2 block text-sm text-[var(--ink-dim)]">
             What are you trying to find?
           </label>
-              <textarea
+          <textarea
             value={userText}
             onChange={(e) => setUserText(e.target.value)}
             placeholder="e.g. People talking about staying in sync with a partner, date night ideas, conversation habits, and moments where a tool like ours would be a direct fit..."
@@ -182,11 +253,11 @@ export default function SiftDashboard() {
               value={subredditsText}
               onChange={(e) => setSubredditsText(e.target.value)}
               rows={8}
-                className="w-full rounded border border-[var(--border)] bg-[var(--panel)] p-4 font-mono-tech text-sm text-[var(--ink)] focus:border-[var(--signal)] focus:outline-none"
-              />
-              <p className="mt-2 text-xs text-[var(--ink-dim)]">
-                Maximum {MAX_SUBREDDITS} subreddits per Phase 1 scan.
-              </p>
+              className="w-full rounded border border-[var(--border)] bg-[var(--panel)] p-4 font-mono-tech text-sm text-[var(--ink)] focus:border-[var(--signal)] focus:outline-none"
+            />
+            <p className="mt-2 text-xs text-[var(--ink-dim)]">
+              Maximum {MAX_SUBREDDITS} subreddits per scan.
+            </p>
           </div>
           <div className="flex gap-3">
             <button
@@ -210,7 +281,12 @@ export default function SiftDashboard() {
         <section>
           <div className="mb-6 flex items-center justify-between">
             <div className="text-sm text-[var(--ink-dim)]">
-              {results.length} posts ranked, highest relevance first
+              {scanStatus === "queued" && "Scan queued — waiting for a worker"}
+              {scanStatus === "running" &&
+                `Scoring posts: ${processedPosts} of ${totalPosts || "..."}`}
+              {scanStatus === "completed" &&
+                `${results.length} posts ranked, highest relevance first`}
+              {scanStatus === "failed" && "Scan failed"}
             </div>
             <button
               onClick={reset}
@@ -219,6 +295,24 @@ export default function SiftDashboard() {
               Start over
             </button>
           </div>
+
+          {(scanStatus === "queued" || scanStatus === "running") && (
+            <div className="mb-6 max-w-xl">
+              <div className="h-2 overflow-hidden rounded-full bg-[var(--signal-dim)]">
+                <div
+                  className="h-full rounded-full bg-[var(--signal)] transition-all duration-500"
+                  style={{
+                    width: totalPosts
+                      ? `${Math.round((processedPosts / totalPosts) * 100)}%`
+                      : "8%",
+                  }}
+                />
+              </div>
+              <p className="mt-2 text-xs text-[var(--ink-dim)]">
+                You can leave this page open while the worker processes the scan.
+              </p>
+            </div>
+          )}
 
           {warnings.length > 0 && (
             <div className="mb-4 space-y-1">
@@ -230,6 +324,7 @@ export default function SiftDashboard() {
             </div>
           )}
 
+          {results.length > 0 && (
           <div className="overflow-x-auto rounded border border-[var(--border)]">
             <table className="w-full text-left text-sm">
               <thead>
@@ -278,6 +373,7 @@ export default function SiftDashboard() {
               </tbody>
             </table>
           </div>
+          )}
         </section>
       )}
     </main>

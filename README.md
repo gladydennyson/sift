@@ -44,7 +44,8 @@ Visit `http://localhost:3000` - that's the actual dashboard.
 
 ## Docker setup
 
-Docker runs the backend and frontend together, so you do not need to
+Docker runs the frontend, backend, Redis queue, and scoring worker together,
+so you do not need to
 activate the Python virtual environment or run the Next.js server manually.
 
 Create the local environment file once and fill in your real values:
@@ -62,6 +63,10 @@ docker compose up --build
 Visit `http://localhost:3000`. The backend health endpoint remains available
 at `http://localhost:8000/health`.
 
+When a scan starts, the API immediately returns a scan ID. Redis queues that
+scan for the worker, the worker fetches and scores posts in the background,
+and the dashboard polls the API to show progress and incremental results.
+
 Stop the stack with `Ctrl+C`, or from another terminal run:
 
 ```bash
@@ -69,6 +74,43 @@ docker compose down
 ```
 
 ## How it works
+
+### Background scan flow
+
+```mermaid
+sequenceDiagram
+    participant F as Frontend dashboard
+    participant A as FastAPI backend
+    participant R as Redis
+    participant W as Background worker
+    participant X as Reddit and DeepSeek
+
+    F->>A: POST /scans with requirements and subreddits
+    A->>R: Save scan request and queue scan ID
+    A-->>F: Return scan ID immediately
+    W->>R: Take next scan ID from queue
+    R-->>W: Return scan request
+    W->>X: Fetch Reddit posts and score them
+    W->>R: Save progress, warnings, and ranked results
+    loop While the scan is running
+        F->>A: GET /scans/{scan_id}
+        A->>R: Read current scan state
+        R-->>A: Return progress and results
+        A-->>F: Show latest progress and results
+    end
+```
+
+Redis has two responsibilities in this flow:
+
+1. **Scan queue:** it holds scan IDs until the worker is available to process
+   them.
+2. **Temporary scan state:** it stores the request, status, progress, warnings,
+   and results so the separate backend and worker containers can access the
+   same information.
+
+Redis does not fetch Reddit posts or calculate relevance scores. The worker
+does that work. Redis connects the API request to the background worker and
+keeps the latest state available for the dashboard.
 
 1. **Input** - type a free-form description of what you're trying to find
    (no need to separately specify a "domain" or "rubric" - the backend
@@ -95,6 +137,7 @@ docker compose down
   descriptive value containing your Reddit username.
 - Set `NEXT_PUBLIC_API_BASE_URL` for a non-local backend. Set the backend's
   comma-separated `SIFT_ALLOWED_ORIGINS` variable for non-local frontends.
-- No data persists between runs yet - refreshing or restarting starts
-  fresh. Persistence, scheduling, and push notifications are later
-  phases (v2+ in the original project plan), not part of this dashboard.
+- Scan state is stored temporarily in Redis for 24 hours. The Docker Redis
+  volume preserves it across ordinary container restarts, but the dashboard
+  does not yet provide permanent scan history. Long-term persistence,
+  scheduling, and push notifications are later phases.
